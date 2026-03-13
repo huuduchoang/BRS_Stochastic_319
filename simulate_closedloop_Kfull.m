@@ -139,7 +139,7 @@ function z = closedloop_rest_rhs_Kfull(~,x,Kstates)
     E2   = 0.4;
     Vol0 = 2;
 
-    dvolrhs = max(0,-E1*(vollung-Vol0)+E2*alpha);
+    dvolrhs = -E1*(vollung-Vol0)+E2*alpha);
 
     %% Lung oxygen
     PO2ext = (760-47)*0.21;
@@ -176,7 +176,7 @@ function z = closedloop_rest_rhs_Kfull(~,x,Kstates)
     z(2) = (h_inf - h)/tau_h;
     z(3) = r*NT*(1-alpha) - r*alpha;
     z(4) = dvolrhs;
-    z(5) = (1/vollung)*(PO2ext-PO2lung)*dvolrhs - Jlb*(R*Temp/vollung);
+    z(5) = (1/vollung)*(PO2ext-PO2lung)*max(0,dvolrhs) - Jlb*(R*Temp/vollung);
     z(6) = (Jlb-Jbt)/(gamma*(betaO2+eta*partial));
 end
 
