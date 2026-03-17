@@ -38,7 +38,7 @@ inits = [old(1);
 
 disp(['Sum of Kinit = ' num2str(sum(Kinit), '%.16f')])
 
-tf = 20000;   % ms
+tf = 100000;   % ms
 dt = 0.05;    % ms
 
 % If your solver uses NK = round(18*Area), then this gives about 1e4 K channels
@@ -182,6 +182,14 @@ title('Fast sodium factor');
 xlim([0 tf/1000]);
 box on; grid on
 legend('Location','best');
+
+%% Save all variables
+timestamp = datestr(now, 'yyyymmdd_HHMMSS');
+baseName  = ['closedloop_compare_' timestamp];
+
+save([baseName '.mat'], '-v7.3');
+
+disp(['Saved all variables to: ' baseName '.mat']);
 
 %% --- LOCAL FUNCTION FOR DETERMINISTIC MODEL ---
 function z = closedloop_modified(~,u)
