@@ -1,4 +1,4 @@
-function [t,U] = simulate_closedloop_Kfull(tf,dt,inits,Area)
+function [t,U] = simulate_closedloop_Kfull(tf,dt,inits,Area,params)
 % Full K-channel noise:
 %   - Euler-Maruyama for 5-state potassium occupancy vector
 %   - ode15s for the remaining deterministic variables
@@ -34,8 +34,13 @@ function [t,U] = simulate_closedloop_Kfull(tf,dt,inits,Area)
         % K_new = K_old ...
         %       + hk * AK_matrix(v_old) * K_old ...
         %       + sqrt(hk) * DKfull_PT(v_old, K_old, NK, xi);
+        if params.noise_on
          K_new = K_old ...
+              + dt * AK_matrix(v_old) * K_old + sqrt(dt) * DKfull_PT(v_old, K_old, NK, xi);
+        else
+            K_new = K_old ...
               + dt * AK_matrix(v_old) * K_old;
+        end
 
         % % Numerical projection back to simplex
         % K_new = max(K_new,0);
@@ -53,7 +58,7 @@ function [t,U] = simulate_closedloop_Kfull(tf,dt,inits,Area)
         % x = [v; hp; hf; alpha; vollung; PO2lung; PO2blood]
         x0 = uk([1 7 8 9 10 11 12]);
 
-        rhs = @(tt,x) closedloop_rest_rhs_Kfull(tt, x, K_new);
+        rhs = @(tt,x) closedloop_rest_rhs_Kfull(tt, x, K_new, params);
         % rhs = @(tt,x) closedloop_rest_rhs_Kfull(tt, x, (K_new + K_old)/2);
 
         [~,Xsol] = ode15s(rhs,[tk t(k+1)],x0,opts);
@@ -76,7 +81,7 @@ function [t,U] = simulate_closedloop_Kfull(tf,dt,inits,Area)
     end
 end
 
-function z = closedloop_rest_rhs_Kfull(~,x,Kstates)
+function z = closedloop_rest_rhs_Kfull(~,x,Kstates, params)
 % x = [v; hp; hf; alpha; vollung; PO2lung; PO2blood]
 % Kstates = [n0;n1;n2;n3;n4], frozen during this substep
 
@@ -162,7 +167,6 @@ function z = closedloop_rest_rhs_Kfull(~,x,Kstates)
     taulb  = 500;
 
     %% Blood oxygen
-    M        = 8e-6;
     Hb       = 150;
     volblood = 5;
     eta      = Hb*1.36;
@@ -178,7 +182,7 @@ function z = closedloop_rest_rhs_Kfull(~,x,Kstates)
               (1/(PO2blood^c+K^c) - (PO2blood^c)/((PO2blood^c+K^c)^2));
 
     Jlb = (1/taulb)*(PO2lung-PO2blood)*(vollung/(R*Temp));
-    Jbt = M*CaO2*gamma;
+    Jbt = params.M*CaO2*gamma;
 
     %% Chemosensory feedback
     gtonic = 0.3*(1-tanh((PO2blood-85)/30));
