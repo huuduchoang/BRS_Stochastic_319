@@ -1,6 +1,7 @@
 function results = run_metabolic_demand_12D(varargin)
 % RUN_METABOLIC_DEMAND_12D
-% Closed-loop-only driver for the 12D model, with checkpoint saving and progress display.
+% Closed-loop-only driver for the 12D model, with progress diagnostics
+% and checkpoint saving.
 %
 % Assumes the simulator has signature:
 %   [t,U] = simulate_closedloop_Kfull(tf, dt, inits, Area, params)
@@ -8,6 +9,9 @@ function results = run_metabolic_demand_12D(varargin)
 % with params containing at least:
 %   params.M
 %   params.noise_on
+%
+% 12D state ordering:
+%   u = [v; n0; n1; n2; n3; n4; hp; hf; alpha; vollung; PO2lung; PO2blood]
 
     %% ---------------------------
     %  User-adjustable defaults
@@ -16,16 +20,18 @@ function results = run_metabolic_demand_12D(varargin)
 
     addParameter(p, 'M0',              8e-6);
     addParameter(p, 'Mvals',           2e-6:0.1e-6:18e-6);
-    addParameter(p, 'tf_seg',          6e4);         % ms
-    addParameter(p, 'dt',              0.05);        % ms
-    addParameter(p, 'Area',            1e4/18);      % gives about 1e4 K channels if NK = round(18*Area)
+    addParameter(p, 'tf_seg',          6e4);              % ms
+    addParameter(p, 'dt',              0.05);             % ms
+    addParameter(p, 'Area',            1e4/18);           % gives about 1e4 K channels if NK = round(18*Area)
     addParameter(p, 'noise_on',        false);
     addParameter(p, 'nRuns',           1);
     addParameter(p, 'rng_seed',        1);
     addParameter(p, 'save_results',    false);
     addParameter(p, 'save_name',       'fig8_12D_closedloop_results.mat');
     addParameter(p, 'checkpoint_name', 'fig8_12D_closedloop_checkpoint.mat');
+    addParameter(p, 'use_parallel',    true);
     addParameter(p, 'save_every_M',    true);
+    addParameter(p, 'verbose',         true);
 
     parse(p, varargin{:});
     S = p.Results;
@@ -54,119 +60,34 @@ function results = run_metabolic_demand_12D(varargin)
 
     avgPO2blood_all = nan(nRuns, nM);
     u_final_all     = nan(12, nM, nRuns);
-
-    run_completed = false(nRuns, nM);
+    run_completed   = false(nRuns, nM);
 
     total_jobs = nRuns * nM;
-    job_counter = 0;
-    t_global = tic;
+    t_global   = tic;
 
-    fprintf('\nStarting 12D metabolic-demand experiment\n');
-    fprintf('nRuns = %d, nM = %d, total jobs = %d\n', nRuns, nM, total_jobs);
-    fprintf('Checkpoint file: %s\n\n', S.checkpoint_name);
+    if S.verbose
+        fprintf('\n=========================================\n');
+        fprintf('Starting 12D metabolic-demand experiment\n');
+        fprintf('nRuns = %d, nM = %d, total jobs = %d\n', nRuns, nM, total_jobs);
+        fprintf('noise_on = %d, use_parallel = %d\n', S.noise_on, S.use_parallel);
+        fprintf('Checkpoint file: %s\n', S.checkpoint_name);
+        fprintf('=========================================\n\n');
+    end
 
     %% ---------------------------
     %  Run experiment
     %  ---------------------------
-    for r = 1:nRuns
-        if S.noise_on
-            rng(S.rng_seed + r - 1, 'twister');
+    if S.use_parallel && nRuns > 1
+        dq = parallel.pool.DataQueue;
+        afterEach(dq, @update_from_packet);
+
+        parfor r = 1:nRuns
+            run_one_realization(r, S, inits12, Mvals, nM, dq, true);
         end
-
-        params = struct();
-        params.noise_on = S.noise_on;
-        params.M        = S.M0;
-
-        fprintf('=============================\n');
-        fprintf('Starting run %d of %d\n', r, nRuns);
-        fprintf('=============================\n');
-
-        % ------------------------
-        % Baseline burn-in at M0
-        % ------------------------
-        fprintf('  Burn-in 1 at M0 = %.6g ... ', S.M0);
-        t_step = tic;
-        [~, U0] = simulate_closedloop_Kfull(12e4, S.dt, inits12, S.Area, params);
-        fprintf('done (%.2f s)\n', toc(t_step));
-        inits1 = U0(end,:).';
-
-        fprintf('  Burn-in 2 at M0 = %.6g ... ', S.M0);
-        t_step = tic;
-        [~, U1] = simulate_closedloop_Kfull(12e4, S.dt, inits1, S.Area, params);
-        fprintf('done (%.2f s)\n', toc(t_step));
-        initsM = U1(end,:).';
-
-        % ------------------------
-        % Sweep over M values
-        % ------------------------
-        for ix = 1:nM
-            params.M = Mvals(ix);
-            job_counter = job_counter + 1;
-
-            fprintf('\nRun %d/%d, M index %d/%d, M = %.6g\n', r, nRuns, ix, nM, params.M);
-            fprintf('Overall progress: %d / %d (%.1f%%)\n', ...
-                job_counter, total_jobs, 100*job_counter/total_jobs);
-
-            t_job = tic;
-
-            % Replicate the old "chain several long segments" approach
-            fprintf('  Segment 2 ... ');
-            t_step = tic;
-            [~, U2] = simulate_closedloop_Kfull(S.tf_seg, S.dt, initsM,       S.Area, params);
-            fprintf('done (%.2f s)\n', toc(t_step));
-
-            fprintf('  Segment 3 ... ');
-            t_step = tic;
-            [~, U3] = simulate_closedloop_Kfull(S.tf_seg, S.dt, U2(end,:).',  S.Area, params);
-            fprintf('done (%.2f s)\n', toc(t_step));
-
-            fprintf('  Segment 4 ... ');
-            t_step = tic;
-            [~, U4] = simulate_closedloop_Kfull(S.tf_seg, S.dt, U3(end,:).',  S.Area, params);
-            fprintf('done (%.2f s)\n', toc(t_step));
-
-            fprintf('  Segment 5 ... ');
-            t_step = tic;
-            [~, U5] = simulate_closedloop_Kfull(S.tf_seg, S.dt, U4(end,:).',  S.Area, params);
-            fprintf('done (%.2f s)\n', toc(t_step));
-
-            fprintf('  Segment 6 ... ');
-            t_step = tic;
-            [t6, U6] = simulate_closedloop_Kfull(S.tf_seg, S.dt, U5(end,:).', S.Area, params);
-            fprintf('done (%.2f s)\n', toc(t_step));
-
-            % Average PO2blood over final segment only
-            PO2blood6 = U6(:,12);
-            avgPO2blood_all(r, ix) = trapz(t6, PO2blood6) / (t6(end) - t6(1));
-
-            % Save final state for continuation and diagnostics
-            u_final_all(:, ix, r) = U6(end,:).';
-            run_completed(r, ix)  = true;
-            initsM = U6(end,:).';
-
-            fprintf('  avgPO2blood = %.6f\n', avgPO2blood_all(r, ix));
-            fprintf('  Finished this M in %.2f s\n', toc(t_job));
-
-            % ------------------------
-            % Save checkpoint
-            % ------------------------
-            if S.save_every_M
-                checkpoint = struct();
-                checkpoint.Mvals            = Mvals;
-                checkpoint.avgPO2blood_all  = avgPO2blood_all;
-                checkpoint.u_final_all      = u_final_all;
-                checkpoint.run_completed    = run_completed;
-                checkpoint.settings         = S;
-                checkpoint.current_run      = r;
-                checkpoint.current_M_index  = ix;
-                checkpoint.elapsed_seconds  = toc(t_global);
-
-                save(S.checkpoint_name, 'checkpoint', '-v7.3');
-                fprintf('  Checkpoint saved to %s\n', S.checkpoint_name);
-            end
+    else
+        for r = 1:nRuns
+            run_one_realization(r, S, inits12, Mvals, nM, @update_from_packet, false);
         end
-
-        fprintf('\nCompleted run %d of %d\n\n', r, nRuns);
     end
 
     %% ---------------------------
@@ -181,14 +102,124 @@ function results = run_metabolic_demand_12D(varargin)
     results.settings         = S;
     results.elapsed_seconds  = toc(t_global);
 
-    fprintf('Total elapsed time: %.2f s\n', results.elapsed_seconds);
-
     %% ---------------------------
     %  Optional final save
     %  ---------------------------
     if S.save_results
         save(S.save_name, 'results', '-v7.3');
-        fprintf('Saved final results to %s\n', S.save_name);
+        if S.verbose
+            fprintf('\nSaved final results to %s\n', S.save_name);
+        end
+    end
+
+    %% ---------------------------
+    %  Nested callback for progress/checkpoint
+    %  ---------------------------
+    function update_from_packet(packet)
+        switch packet.type
+            case 'run_start'
+                if S.verbose
+                    fprintf('Starting run %d of %d\n', packet.r, nRuns);
+                end
+
+            case 'M_done'
+                avgPO2blood_all(packet.r, packet.ix) = packet.avgPO2blood;
+                u_final_all(:, packet.ix, packet.r)  = packet.ufinal;
+                run_completed(packet.r, packet.ix)   = true;
+
+                completed_jobs = nnz(run_completed);
+                pct_complete   = 100 * completed_jobs / total_jobs;
+                elapsed_sec    = toc(t_global);
+
+                if S.verbose
+                    fprintf(['Run %d/%d, M index %d/%d, M = %.6g, ' ...
+                             'avgPO2blood = %.6f, progress = %d/%d (%.1f%%), elapsed = %.1f s\n'], ...
+                             packet.r, nRuns, packet.ix, nM, packet.M, ...
+                             packet.avgPO2blood, completed_jobs, total_jobs, pct_complete, elapsed_sec);
+                end
+
+                if S.save_every_M
+                    checkpoint = struct();
+                    checkpoint.Mvals            = Mvals;
+                    checkpoint.avgPO2blood_all  = avgPO2blood_all;
+                    checkpoint.u_final_all      = u_final_all;
+                    checkpoint.run_completed    = run_completed;
+                    checkpoint.settings         = S;
+                    checkpoint.elapsed_seconds  = elapsed_sec;
+
+                    save(S.checkpoint_name, 'checkpoint', '-v7.3');
+                end
+
+            case 'run_done'
+                if S.verbose
+                    fprintf('Completed run %d of %d\n', packet.r, nRuns);
+                end
+        end
+    end
+end
+
+
+function run_one_realization(r, S, inits12, Mvals, nM, reporter, useDataQueue)
+    if S.noise_on
+        rng(S.rng_seed + r - 1, 'twister');
+    end
+
+    send_or_call(reporter, useDataQueue, struct('type', 'run_start', 'r', r));
+
+    params = struct();
+    params.noise_on = S.noise_on;
+    params.M        = S.M0;
+
+    % ------------------------
+    % Baseline burn-in at M0
+    % ------------------------
+    [~, U0] = simulate_closedloop_Kfull(1e5, S.dt, inits12, S.Area, params);
+    inits1 = U0(end,:).';
+
+    [~, U1] = simulate_closedloop_Kfull(1e5, S.dt, inits1, S.Area, params);
+    initsM = U1(end,:).';
+
+    % ------------------------
+    % Sweep over M values
+    % ------------------------
+    for ix = 1:nM
+        params.M = Mvals(ix);
+
+        [~, U2]  = simulate_closedloop_Kfull(S.tf_seg, S.dt, initsM,       S.Area, params);
+        [~, U3]  = simulate_closedloop_Kfull(S.tf_seg, S.dt, U2(end,:).',  S.Area, params);
+        [~, U4]  = simulate_closedloop_Kfull(S.tf_seg, S.dt, U3(end,:).',  S.Area, params);
+        [~, U5]  = simulate_closedloop_Kfull(S.tf_seg, S.dt, U4(end,:).',  S.Area, params);
+        [t6, U6] = simulate_closedloop_Kfull(S.tf_seg, S.dt, U5(end,:).',  S.Area, params);
+
+        % Average PO2blood over final segment only
+        PO2blood6    = U6(:,12);
+        avgPO2blood  = trapz(t6, PO2blood6) / (t6(end) - t6(1));
+        ufinal       = U6(end,:).';
+
+        % Send partial result back to client
+        packet = struct();
+        packet.type         = 'M_done';
+        packet.r            = r;
+        packet.ix           = ix;
+        packet.M            = params.M;
+        packet.avgPO2blood  = avgPO2blood;
+        packet.ufinal       = ufinal;
+
+        send_or_call(reporter, useDataQueue, packet);
+
+        % continuation in M
+        initsM = ufinal;
+    end
+
+    send_or_call(reporter, useDataQueue, struct('type', 'run_done', 'r', r));
+end
+
+
+function send_or_call(reporter, useDataQueue, packet)
+    if useDataQueue
+        send(reporter, packet);
+    else
+        reporter(packet);
     end
 end
 
